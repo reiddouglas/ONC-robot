@@ -1,6 +1,9 @@
 #pragma config(I2C_Usage, I2C1, i2cSensors)
-#pragma config(Sensor, in1,    infraSensor,    sensorReflection)
-#pragma config(Sensor, dgtl7,  sonarSensor,    sensorSONAR_cm)
+#pragma config(Sensor, in7,    infraSensor,    sensorReflection)
+#pragma config(Sensor, dgtl2,  button,         sensorTouch)
+#pragma config(Sensor, dgtl3,  RedLED,         sensorDigitalOut)
+#pragma config(Sensor, dgtl7,  RedLED2,        sensorDigitalOut)
+#pragma config(Sensor, dgtl10, sonarSensor,    sensorSONAR_cm)
 #pragma config(Sensor, I2C_1,  encoder,        sensorQuadEncoderOnI2CPort,    , AutoAssign )
 #pragma config(Motor,  port1,           motorRight,    tmotorVex269_HBridge, openLoop, reversed, encoderPort, I2C_1)
 #pragma config(Motor,  port2,           motorLeft,     tmotorVex269_MC29, openLoop)
@@ -16,32 +19,24 @@ enum T_systemState{
 
 T_systemState systemState = FIND_TARGET_SPIN;
 
-enum T_turnState{
-	TURN_LEFT = 0,
-	TURN_RIGHT
-};
-
-T_turnState turnState = TURN_LEFT;
-
-const int fullTurn = 1000;
+const int fullTurn = 1000;	//the encoder value for a whole 360 degree turn
 const int infraSensorThreshhold = 1000;
-const int wallThreshhold = 5;
-const int infraSensorCloseThreshhold = 1000;
-const int objectPlacementThreshhold = 5;
-const int motorDefault = 15;
-int distanceSaved = 0;
-int infraredSaved = 0;
+const int wallThreshhold = 30;	//in cm
+const int infraSensorCloseThreshhold = 500;
+const int objectPlacementThreshhold = 5; //in cm
+const int motorDefault = 50;
 
-task main()
-{
-	T_systemState systemState = FIND_TARGET_SPIN;
-
-	resetMotorEncoder(motorRight);
-}
+const  int OFF = 0;
+const  int ON  = 1;
 
 void moveForwards(){
 		motor[motorRight] = motorDefault;
 		motor[motorLeft] = motorDefault;
+}
+
+void moveForwardsSlow(){
+		motor[motorRight] = motorDefault/10;
+		motor[motorLeft] = motorDefault/10;
 }
 
 void moveReverse(){
@@ -80,30 +75,73 @@ void preChangeState(){
 	resetMotorEncoder(motorRight);
 }
 
+
+//Checks if target is within close range using infrared scanner
 bool targetCheck(){
-	if(SensorValue[sonarSensor] < wallThreshhold && SensorValue[infraSensor] < infraSensorCloseThreshhold){
-			return true;
+	clearTimer(T1);
+	while(time100[T1]<10){
+		if(SensorValue[infraSensor] < infraSensorCloseThreshhold){
+				return true;
+		}
 	}
 	return false;
 }
 
+bool button_pushed;
+
+void monitorInput()
+{
+  if(SensorValue(button) && !button_pushed)
+  {
+    button_pushed = true;
+  }
+
+}
+
+/*
+How spin works:
+
+1. The robot begins turning left continuously
+
+2. If the robot is too close to a wall, back up a bit and then begin spinning again
+
+3. If the infra sensor is tripped, stop and begins approaching target
+
+4. If the robot completes a 1.25 turn unprompted, robot will move to new area
+*/
+
 void spin(){
-	if(getMotorEncoder(motorRight) < 1.25*fullTurn){
+	while(SensorValue[sonarSensor] > wallThreshhold || SensorValue[sonarSensor]<0){
+
 		turnLeft();
-		if(SensorValue[sonarSensor] < wallThreshhold){
-			moveReverse();
-			wait1Msec(500);
-			preChangeState();
-		}
-		if(SensorValue[infraSensor] > infraSensorThreshhold){
+		if(SensorValue[infraSensor] < infraSensorThreshhold){
 			preChangeState();
 			systemState = FIND_TARGET_CLOSE;
+			return;
 		}
-	}else{
-		preChangeState();
-		systemState = MOVE_NEW_AREA;
+
+		if(getMotorEncoder(motorRight) < -1500){
+			preChangeState();
+			systemState = MOVE_NEW_AREA;
+	  }
 	}
+	moveReverse();
+	wait1Msec(500);
+	preChangeState();
+	SensorValue(RedLED) = ON;
 }
+
+/*
+How moveNewArea works:
+
+1. The robot begins moving forward
+
+2. If the robot is too close to a wall, back up a bit and then begin spin protocol
+
+3. If the infra sensor is tripped, stop and begin approaching target
+
+NOTE: The robot should always hit a wall in a square arena, hence there is no check on the motor encoder
+*/
 
 void moveNewArea(){
 	moveForwards();
@@ -113,44 +151,120 @@ void moveNewArea(){
 		preChangeState();
 		systemState = FIND_TARGET_SPIN;
 	}
-	if(SensorValue[infraSensor] > infraSensorThreshhold){
+	if(SensorValue[infraSensor] < infraSensorThreshhold){
 		preChangeState();
 		systemState = FIND_TARGET_CLOSE;
 	}
 }
 
+/*
+How findTarget works:
+
+1. The robot continues to move forwards so long as the infra sensor is tripped within an interval (IR pulses at 10Hz or every 1/10 of a second)
+
+2. If the IR sensor becomes untripped, spin
+
+3. If the IR sensor is still tripped when the robot encounters a wall, does a check
+
+4. The check will pass if the object is within a certain IR threshold
+
+5. If the check passes, robot prepares to place object
+
+6. If check fails, backup and spin
+*/
+
 void findTarget(){
-
-	if(targetCheck()){
-		preChangeState();
-		systemState = PLACE_OBJECT;
-		return;
-	}
-	switch(turnState){
-
-		case(TURN_LEFT):
-
-			turnSlightLeft();
-			if(infraredSaved < SensorValue[infraSensor]){
-				turnState = TURN_RIGHT;
-			}else{
-				infraredSaved = SensorValue[infraSensor];
+	clearTimer(T1);
+	while(time100[T1]<5){
+		moveForwards();
+		if(SensorValue[infraSensor] < infraSensorThreshhold){
+			clearTimer(T1);
+		}
+		if(SensorValue[sonarSensor] < wallThreshhold){
+			if(targetCheck()){
+				preChangeState();
+				systemState = PLACE_OBJECT;
+				return;
 			}
-
-			case(TURN_RIGHT):
-
-			turnSlightRight();
-			if(infraredSaved < SensorValue[infraSensor]){
-				turnState = TURN_LEFT;
-			}else{
-				infraredSaved = SensorValue[infraSensor];
-			}
+		}
 	}
-
+	preChangeState();
+	systemState = FIND_TARGET_SPIN;
 }
 
+/*
+How placeObject works:
+
+1. SLOWLY inch forwards until within suitable range to place object
+
+2. Activate placement mechanism
+
+3. Back away from target slightly
+
+4. Turn on LED to signal completion
+
+*/
+
+
 void placeObject(){
+		//move forwards
+		while(SensorValue[sonarSensor]>objectPlacementThreshhold){
+			moveForwardsSlow();
+		}
+		//Place object
+		moveStop();
 		motor[motorClaw] = 10;
 		wait1Msec(500);
 		motor[motorClaw] = 0;
+
+		//back up
+		moveReverse();
+		wait1Msec(500);
+		moveStop();
+
+		//signal completion
+		SensorValue(RedLED) = ON;
+}
+
+task main()
+{
+	button_pushed = false;
+	SensorValue(RedLED) = OFF;
+	SensorValue(RedLED2) = OFF;
+	resetMotorEncoder(motorRight);
+
+	while (true){
+
+		monitorInput();
+
+		//tests only start when button is pushed
+
+		if (button_pushed){
+
+			SensorValue(RedLED) = OFF;
+			SensorValue(RedLED2) = OFF;
+
+			switch(systemState){
+
+				case(FIND_TARGET_SPIN):
+					spin();
+					break;
+
+				case(MOVE_NEW_AREA):
+					moveNewArea();
+					break;
+
+				case(FIND_TARGET_CLOSE):
+					findTarget();
+					break;
+
+				case(PLACE_OBJECT):
+					placeObject();
+					break;
+
+				default:
+					break;
+			}
+		}
+	}
 }
